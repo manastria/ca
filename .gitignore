@@ -1,0 +1,4 @@
+*.pem
+*.old
+./config.sh
+

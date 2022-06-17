@@ -1,0 +1,1028 @@
+= AsciiDoc Article Title
+Firstname Lastname <author@asciidoctor.org>
+v1.0, October 2, 2013: AsciiDoctor Template
+////
+revnumber and revdate must be separated by a comma (,).                                                          1.0
+revdate can contain words, letters, numbers, and symbols.                                                        October 2, 2013
+The revremark attribute must be preceded by a colon (:), regardless of whether revnumber or revdate are set.     AsciiDoctor Template
+////
+:toc:
+:icons: font
+:quick-uri: https://asciidoctor.org/docs/asciidoc-syntax-quick-reference/
+// :author: Firstname Lastname
+// :email: author@asciidoctor.org
+// :revnumber: 1.0
+// :revdate: October 2, 2013
+// :revremark: AsciiDoctor Template
+:encoding: utf-8
+:lang: fr
+:experimental:
+:toc:
+:imagesdir: images
+:doctype: article
+:icons: font
+:source-highlighter: highlight.js
+:numbered:
+:stylesheet:
+:data-uri:
+:allow-uri-read:
+
+== Introduction 
+
+OpenSSL est une bibliothèque cryptographique gratuite et open-source qui fournit plusieurs outils en ligne de commande pour la gestion des certificats numériques. Certains de ces outils peuvent être utilisés pour faire office d'autorité de certification.
+
+Une autorité de certification (CA) est une entité qui signe des certificats numériques. De nombreux sites web doivent faire savoir à leurs clients que la connexion est sécurisée. Ils paient donc une autorité de certification de confiance internationale (par exemple, VeriSign, DigiCert) pour signer un certificat pour leur domaine.
+
+Dans certains cas, il peut être plus judicieux d'agir en tant que votre propre AC, plutôt que de payer une AC comme DigiCert. Les cas les plus courants sont la sécurisation d'un site web intranet ou l'émission de certificats à des clients pour leur permettre de s'authentifier auprès d'un serveur (par exemple, Apache, OpenVPN).
+
+
+== Créer la paire racine
+
+Agir en tant qu'autorité de certification (CA) signifie traiter des paires cryptographiques de clés privées et de certificats publics. La toute première paire cryptographique que nous allons créer est la paire racine. Elle se compose de la clé racine (ca.key.pem) et du certificat racine (ca.cert.pem). Cette paire constitue l'identité de votre AC.
+
+En général, l'autorité de certification racine ne signe pas directement les certificats des serveurs ou des clients. L'autorité de certification racine n'est jamais utilisée que pour créer une ou plusieurs autorités de certification intermédiaires, auxquelles l'autorité de certification racine fait confiance pour signer des certificats en son nom. C'est la meilleure pratique. Elle permet de garder la clé racine hors ligne et inutilisée autant que possible, car toute compromission de la clé racine est désastreuse.
+
+NOTE: La meilleure pratique consiste à créer la paire de racines dans un environnement sécurisé. L'idéal est de le faire sur un ordinateur entièrement chiffré et isolé d'Internet de façon permanente. Retirez la carte sans fil et remplissez le port Ethernet de colle.
+
+=== Préparer le répertoire
+
+Choisissez un répertoire (`/root/ca`) pour stocker toutes les clés et les certificats.
+
+----
+# mkdir /root/ca
+----
+
+Créez la structure du répertoire. Les fichiers index.txt et serial agissent comme une base de données de fichiers plats pour garder la trace des certificats signés.
+
+[source,console]
+----
+# cd /root/ca
+# mkdir certs crl newcerts private
+# chmod 700 private
+# touch index.txt
+# echo 1000 > serial
+----
+
+
+=== Préparer le fichier de configuration
+
+Vous devez créer un fichier de configuration à utiliser par OpenSSL. Copiez le fichier de configuration de l'autorité de certification racine de l'annexe vers `/root/ca/openssl.cnf`.
+
+La section `[ ca ]` est obligatoire. Nous indiquons ici à OpenSSL d'utiliser les options de la section `[ CA_default ]`.
+
+----
+[ ca ]
+# `man ca`
+default_ca = CA_default
+----
+
+La section `[ CA_default ]` contient une série de valeurs par défaut. Assurez-vous de déclarer le répertoire que vous avez choisi précédemment (`/root/ca`).
+
+----
+[ CA_default ]
+# Directory and file locations.
+dir               = /root/ca
+certs             = $dir/certs
+crl_dir           = $dir/crl
+new_certs_dir     = $dir/newcerts
+database          = $dir/index.txt
+serial            = $dir/serial
+RANDFILE          = $dir/private/.rand
+
+# The root key and root certificate.
+private_key       = $dir/private/ca.key.pem
+certificate       = $dir/certs/ca.cert.pem
+
+# For certificate revocation lists.
+crlnumber         = $dir/crlnumber
+crl               = $dir/crl/ca.crl.pem
+crl_extensions    = crl_ext
+default_crl_days  = 30
+
+# SHA-1 is deprecated, so use SHA-2 instead.
+default_md        = sha256
+
+name_opt          = ca_default
+cert_opt          = ca_default
+default_days      = 375
+preserve          = no
+policy            = policy_strict
+----
+
+Nous appliquerons la `policy_strict` pour toutes les signatures réalisées par l'autorité de certification racine, car cette dernière n'est utilisée que pour créer des autorités de certification intermédiaires.
+
+----
+[ policy_strict ]
+# The root CA should only sign intermediate certificates that match.
+# See the POLICY FORMAT section of `man ca`.
+countryName             = match
+stateOrProvinceName     = match
+organizationName        = match
+organizationalUnitName  = optional
+commonName              = supplied
+emailAddress            = optional
+----
+
+loose : en vrac
+
+Nous appliquerons `policy_loose` pour toutes les signatures d'AC intermédiaires, car l'AC intermédiaire signe des certificats de serveur et de client qui peuvent provenir de diverses tierces parties.
+
+----
+[ policy_loose ]
+# Allow the intermediate CA to sign a more diverse range of certificates.
+# See the POLICY FORMAT section of the `ca` man page.
+countryName             = optional
+stateOrProvinceName     = optional
+localityName            = optional
+organizationName        = optional
+organizationalUnitName  = optional
+commonName              = supplied
+emailAddress            = optional
+----
+
+
+Les options de la section `[ req ]` sont appliquées lors de la création de certificats ou de demandes de signature de certificats.
+
+----
+[ req ]
+# Options for the `req` tool (`man req`).
+default_bits        = 2048
+distinguished_name  = req_distinguished_name
+string_mask         = utf8only
+
+# SHA-1 is deprecated, so use SHA-2 instead.
+default_md          = sha256
+
+# Extension to add when the -x509 option is used.
+x509_extensions     = v3_ca
+----
+
+
+La section `[ req_distinguished_name ]` déclare les informations normalement requises dans une demande de signature de certificat. Vous pouvez éventuellement spécifier des valeurs par défaut.
+
+----
+[ req_distinguished_name ]
+# See <https://en.wikipedia.org/wiki/Certificate_signing_request>.
+countryName                     = Country Name (2 letter code)
+stateOrProvinceName             = State or Province Name
+localityName                    = Locality Name
+0.organizationName              = Organization Name
+organizationalUnitName          = Organizational Unit Name
+commonName                      = Common Name
+emailAddress                    = Email Address
+
+# Optionally, specify some defaults.
+countryName_default             = GB
+stateOrProvinceName_default     = England
+localityName_default            =
+0.organizationName_default      = Alice Ltd
+#organizationalUnitName_default =
+#emailAddress_default           =
+----
+
+
+Les quelques sections suivantes sont des extensions qui peuvent être appliquées lors de la signature de certificats. Par exemple, le passage de l'argument de ligne de commande `-extensions v3_ca` appliquera les options définies dans `[ v3_ca ]`.
+
+Nous appliquerons l'extension `v3_ca` lorsque nous créerons le certificat racine.
+
+----
+[ v3_ca ]
+# Extensions for a typical CA (`man x509v3_config`).
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints = critical, CA:true
+keyUsage = critical, digitalSignature, cRLSign, keyCertSign
+----
+
+
+Nous appliquerons l'extension `v3_ca_intermediate` lorsque nous créerons le certificat intermédiaire. `pathlen:0` garantit qu'il ne peut y avoir d'autres autorités de certification en dessous de l'AC intermédiaire.
+
+----
+[ v3_intermediate_ca ]
+# Extensions for a typical intermediate CA (`man x509v3_config`).
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints = critical, CA:true, pathlen:0
+keyUsage = critical, digitalSignature, cRLSign, keyCertSign
+----
+
+Nous appliquerons l'extension `usr_cert` lors de la signature de certificats clients, tels que ceux utilisés pour l'authentification des utilisateurs à distance.
+
+----
+[ usr_cert ]
+# Extensions for client certificates (`man x509v3_config`).
+basicConstraints = CA:FALSE
+nsCertType = client, email
+nsComment = "OpenSSL Generated Client Certificate"
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+keyUsage = critical, nonRepudiation, digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth, emailProtection
+----
+
+Nous appliquerons l'extension `server_cert` lors de la signature de certificats de serveur, tels que ceux utilisés pour les serveurs web.
+
+----
+[ server_cert ]
+# Extensions for server certificates (`man x509v3_config`).
+basicConstraints = CA:FALSE
+nsCertType = server
+nsComment = "OpenSSL Generated Server Certificate"
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer:always
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+----
+
+
+L'extension `crl_ext` est automatiquement appliquée lors de la création de listes de **révocation de certificats**.
+
+----
+[ crl_ext ]
+# Extension for CRLs (`man x509v3_config`).
+authorityKeyIdentifier=keyid:always
+----
+
+
+Nous allons appliquer l'extension `ocsp` lors de la signature du certificat OCSP (_Online Certificate Status Protocol_).
+
+----
+[ ocsp ]
+# Extension for OCSP signing certificates (`man ocsp`).
+basicConstraints = CA:FALSE
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+keyUsage = critical, digitalSignature
+extendedKeyUsage = critical, OCSPSigning
+----
+
+
+=== Créer la clé racine
+
+Créez la clé racine (`ca.key.pem`) et conservez-la en toute sécurité. Toute personne en possession de la clé racine peut émettre des certificats de confiance. Chiffrez la clé racine avec un chiffrement AES 256 bits et un mot de passe fort.
+
+NOTE: Utilisez 4096 bits pour toutes les clés d'autorité de certification racine et intermédiaire. Vous serez toujours en mesure de signer des certificats de serveur et de client d'une longueur inférieure.
+
+[source,console]
+----
+# cd /root/ca
+# openssl genrsa -aes256 -out private/ca.key.pem 4096
+
+Enter pass phrase for ca.key.pem: secretpassword
+Verifying - Enter pass phrase for ca.key.pem: secretpassword
+
+# chmod 400 private/ca.key.pem
+----
+
+
+=== Créer le certificat racine
+
+Utilisez la clé racine (`ca.key.pem`) pour créer un certificat racine (`ca.cert.pem`). Donnez au certificat racine une longue date d'expiration, par exemple vingt ans. Une fois que le certificat racine expire, tous les certificats signés par l'AC deviennent invalides.
+
+WARNING: Chaque fois que vous utilisez l'outil `req`, vous devez spécifier un fichier de configuration à utiliser avec l'option `-config`, sinon OpenSSL utilisera par défaut `/etc/pki/tls/openssl.cnf`.
+
+[source,console]
+----
+# cd /root/ca
+# openssl req -config openssl.cnf \
+      -key private/ca.key.pem \
+      -new -x509 -days 7300 -sha256 -extensions v3_ca \
+      -out certs/ca.cert.pem
+
+Enter pass phrase for ca.key.pem: secretpassword
+You are about to be asked to enter information that will be incorporated
+into your certificate request.
+-----
+Country Name (2 letter code) [XX]:GB
+State or Province Name []:England
+Locality Name []:
+Organization Name []:Alice Ltd
+Organizational Unit Name []:Alice Ltd Certificate Authority
+Common Name []:Alice Ltd Root CA
+Email Address []:
+
+# chmod 444 certs/ca.cert.pem
+----
+
+
+=== Vérifier le certificat racine
+
+[source,console]
+----
+# openssl x509 -noout -text -in certs/ca.cert.pem
+----
+
+Le résultat montre :
+
+* l'algorithme de signature (`Signature Algorithm`)utilisé
+* les dates de validité (`Validity`) du certificat
+* la longueur des bits de la clé publique (`Public-Key`)
+* l'émetteur (`Issuer`), qui est l'entité qui a signé le certificat
+* le sujet (`Subject`), qui fait référence au certificat lui-même
+
+L'émetteur (`Issuer`) et le sujet (`Subject`) sont identiques car le certificat est auto-signé. Notez que tous les certificats racine sont auto-signés.
+
+----
+Signature Algorithm: sha256WithRSAEncryption
+    Issuer: C=GB, ST=England,
+            O=Alice Ltd, OU=Alice Ltd Certificate Authority,
+            CN=Alice Ltd Root CA
+    Validity
+        Not Before: Apr 11 12:22:58 2015 GMT
+        Not After : Apr  6 12:22:58 2035 GMT
+    Subject: C=GB, ST=England,
+             O=Alice Ltd, OU=Alice Ltd Certificate Authority,
+             CN=Alice Ltd Root CA
+    Subject Public Key Info:
+        Public Key Algorithm: rsaEncryption
+            Public-Key: (4096 bit)
+----
+
+
+La sortie montre également les *extensions X509v3* (`X509v3 extensions`). Nous avons appliqué l'extension `v3_ca`, donc les options de `[ v3_ca ]` devraient être reflétées dans la sortie.
+
+----
+X509v3 extensions:
+    X509v3 Subject Key Identifier:
+        38:58:29:2F:6B:57:79:4F:39:FD:32:35:60:74:92:60:6E:E8:2A:31
+    X509v3 Authority Key Identifier:
+        keyid:38:58:29:2F:6B:57:79:4F:39:FD:32:35:60:74:92:60:6E:E8:2A:31
+
+    X509v3 Basic Constraints: critical
+        CA:TRUE
+    X509v3 Key Usage: critical
+        Digital Signature, Certificate Sign, CRL Sign
+----
+
+
+== Créer la paire intermédiaire
+
+Une autorité de certification intermédiaire (AC) est une entité qui peut signer des certificats au nom de l'AC racine. L'autorité de certification racine signe le certificat intermédiaire, formant ainsi une chaîne de confiance.
+
+L'objectif de l'utilisation d'une AC intermédiaire est principalement la sécurité. La clé racine peut être conservée hors ligne et utilisée le moins souvent possible. Si la clé intermédiaire est compromise, l'autorité de certification racine peut révoquer le certificat intermédiaire et créer une nouvelle paire cryptographique intermédiaire.
+
+
+=== Préparer le répertoire
+
+Les fichiers de l'autorité de certification racine sont conservés dans le répertoire `/root/ca`. Choisissez un autre répertoire (`/root/ca/intermediate`) pour stocker les fichiers CA intermédiaires.
+
+[source,console]
+----
+# mkdir /root/ca/intermediate
+----
+
+Créez la même structure de répertoire que celle utilisée pour les fichiers de l'autorité de certification racine. Il est pratique de créer également un répertoire `csr` pour contenir les demandes de signature de certificats.
+
+[source,console]
+----
+# cd /root/ca/intermediate
+# mkdir certs crl csr newcerts private
+# chmod 700 private
+# touch index.txt
+# echo 1000 > serial
+----
+
+
+Ajoutez un fichier `crlnumber` à l'arborescence de l'AC intermédiaire. `crlnumber` est utilisé pour conserver la trace des listes de révocation de certificats.
+
+[source,console]
+----
+# echo 1000 > /root/ca/intermediate/crlnumber
+----
+
+
+Copiez le fichier de configuration de l'AC intermédiaire de l'annexe vers `/root/ca/intermediate/openssl.cnf`. Cinq options ont été modifiées par rapport au fichier de configuration de l'AC racine :
+
+----
+[ CA_default ]
+dir             = /root/ca/intermediate
+private_key     = $dir/private/intermediate.key.pem
+certificate     = $dir/certs/intermediate.cert.pem
+crl             = $dir/crl/intermediate.crl.pem
+policy          = policy_loose
+----
+
+
+=== Créer la clé intermédiaire
+
+Créez la clé intermédiaire (`intermediate.key.pem`). Chiffrez la clé intermédiaire avec un chiffrement AES 256 bits et un mot de passe fort.
+
+[source,console]
+----
+# cd /root/ca
+# openssl genrsa -aes256 \
+      -out intermediate/private/intermediate.key.pem 4096
+
+Enter pass phrase for intermediate.key.pem: secretpassword
+Verifying - Enter pass phrase for intermediate.key.pem: secretpassword
+
+# chmod 400 intermediate/private/intermediate.key.pem
+----
+
+
+=== Créer le certificat intermédiaire
+
+Utilisez la clé intermédiaire pour créer une demande de signature de certificat (CSR). Les détails doivent généralement correspondre à ceux de l'autorité de certification racine. Le nom commun *_Common Name_*, cependant, doit être différent.
+
+WARNING: Assurez-vous de spécifier le fichier de configuration de l'AC intermédiaire (`intermediate/openssl.cnf`).
+
+[source,console]
+----
+# cd /root/ca
+# openssl req -config intermediate/openssl.cnf -new -sha256 \
+      -key intermediate/private/intermediate.key.pem \
+      -out intermediate/csr/intermediate.csr.pem
+
+Enter pass phrase for intermediate.key.pem: secretpassword
+You are about to be asked to enter information that will be incorporated
+into your certificate request.
+-----
+Country Name (2 letter code) [XX]:GB
+State or Province Name []:England
+Locality Name []:
+Organization Name []:Alice Ltd
+Organizational Unit Name []:Alice Ltd Certificate Authority
+Common Name []:Alice Ltd Intermediate CA
+Email Address []:
+----
+
+
+Pour créer un certificat intermédiaire, utilisez l'AC racine avec l'extension `v3_intermediate_ca` pour signer le CSR intermédiaire. Le certificat intermédiaire doit être valide pour une période plus courte que le certificat racine. Une période de dix ans serait raisonnable.
+
+WARNING: Cette fois, spécifiez le fichier de configuration de l'autorité de certification racine (`/root/ca/openssl.cnf`).
+
+[source,console]
+----
+# cd /root/ca
+# openssl ca -config openssl.cnf -extensions v3_intermediate_ca \
+      -days 3650 -notext -md sha256 \
+      -in intermediate/csr/intermediate.csr.pem \
+      -out intermediate/certs/intermediate.cert.pem
+
+Enter pass phrase for ca.key.pem: secretpassword
+Sign the certificate? [y/n]: y
+
+# chmod 444 intermediate/certs/intermediate.cert.pem
+----
+
+Le fichier `index.txt` est l'endroit où l'outil OpenSSL `ca` stocke la base de données des certificats. Ne supprimez pas ou ne modifiez pas ce fichier à la main. Il devrait maintenant contenir une ligne qui fait référence au certificat intermédiaire.
+
+----
+V 250408122707Z 1000 unknown ... /CN=Alice Ltd Intermediate CA
+----
+
+
+=== Vérifier le certificat intermédiaire
+
+Comme nous l'avons fait pour le certificat racine, vérifiez que les détails du certificat intermédiaire sont corrects.
+
+[source,console]
+----
+# openssl x509 -noout -text \
+      -in intermediate/certs/intermediate.cert.pem
+----
+
+
+Vérifiez le certificat intermédiaire par rapport au certificat racine. Un OK indique que la chaîne de confiance est intacte.
+
+[source,console]
+----
+# openssl verify -CAfile certs/ca.cert.pem \
+      intermediate/certs/intermediate.cert.pem
+
+intermediate.cert.pem: OK
+----
+
+
+=== Créer le fichier de la chaîne de certificats
+
+
+Lorsqu'une application (par exemple, un navigateur Web) tente de vérifier un certificat signé par l'AC intermédiaire, elle doit également vérifier le certificat intermédiaire par rapport au certificat racine. Pour compléter la chaîne de confiance, créez une chaîne de certificats d'AC à présenter à l'application.
+
+Pour créer la chaîne de certificats de l'AC, concaténer les certificats intermédiaires et racine ensemble. Nous utiliserons ce fichier plus tard pour vérifier les certificats signés par l'AC intermédiaire.
+
+[source,console]
+----
+# cat intermediate/certs/intermediate.cert.pem \
+      certs/ca.cert.pem > intermediate/certs/ca-chain.cert.pem
+# chmod 444 intermediate/certs/ca-chain.cert.pem
+----
+
+NOTE: Notre fichier de chaîne de certificats doit inclure le certificat racine car aucune application cliente ne le connaît encore. Une meilleure option, en particulier si vous administrez un intranet, est d'installer votre certificat racine sur chaque client qui doit se connecter. Dans ce cas, le fichier de chaîne ne doit contenir que votre certificat intermédiaire.
+
+== Signer les certificats du serveur et du client
+
+Nous allons signer des certificats en utilisant notre AC intermédiaire. Vous pouvez utiliser ces certificats signés dans de nombreuses situations, par exemple pour sécuriser les connexions à un serveur Web ou pour authentifier les clients qui se connectent à un service.
+
+NOTE: Les étapes ci-dessous se situent de votre point de vue en tant qu'autorité de certification. Un tiers peut toutefois créer sa propre clé privée et sa demande de signature de certificat (CSR) sans vous révéler sa clé privée. Il vous donne sa CSR, et vous lui rendez un certificat signé. Dans ce scénario, ignorez les commandes `genrsa` et `req`.
+
+=== Créer une clé
+
+Nos paires racine et intermédiaire sont de 4096 bits. Les certificats des serveurs et des clients expirent normalement au bout d'un an. Nous pouvons donc utiliser 2048 bits en toute sécurité.
+
+NOTE: Bien que 4096 bits soient plus sûrs que 2048 bits, ils ralentissent les échanges TLS et augmentent considérablement la charge du processeur pendant les échanges. Pour cette raison, la plupart des sites Web utilisent des paires de 2048 bits.
+
+Si vous créez une paire cryptographique à utiliser avec un serveur Web (par exemple, Apache), vous devrez entrer ce mot de passe à chaque fois que vous redémarrerez le serveur Web. 
+
+TIP: Vous pouvez omettre l'option `-aes256` pour créer **une clé sans mot de passe**.
+
+[source,console]
+----
+# cd /root/ca
+# openssl genrsa -aes256 \
+      -out intermediate/private/www.example.com.key.pem 2048
+# chmod 400 intermediate/private/www.example.com.key.pem
+----
+
+
+=== Créer un certificat
+
+Utilisez la clé privée pour créer une demande de signature de certificat (CSR). Les détails de la CSR ne doivent pas nécessairement correspondre à ceux de l'AC intermédiaire. Pour les certificats de serveur, le nom commun (_Common Name_) doit être un nom de domaine entièrement qualifié (par exemple, www.example.com), tandis que pour les certificats de client, il peut être un identifiant unique (par exemple, une adresse e-mail). Notez que le nom commun (_Common Name_) ne peut pas être le même que celui de votre certificat racine ou intermédiaire.
+
+[source,console]
+----
+# cd /root/ca
+# openssl req -config intermediate/openssl.cnf \
+      -key intermediate/private/www.example.com.key.pem \
+      -new -sha256 -out intermediate/csr/www.example.com.csr.pem
+
+Enter pass phrase for www.example.com.key.pem: secretpassword
+You are about to be asked to enter information that will be incorporated
+into your certificate request.
+-----
+Country Name (2 letter code) [XX]:US
+State or Province Name []:California
+Locality Name []:Mountain View
+Organization Name []:Alice Ltd
+Organizational Unit Name []:Alice Ltd Web Services
+Common Name []:www.example.com
+Email Address []:
+----
+
+
+TIP: Un __Subject Alternative Name__ est une extension de la norme X509, cela permet d'ajouter des informations additionnelles dans un certificat. Pour créer une CSR avec un SAN,
+ajouter `-addext 'subjectAltName = DNS:example.com,DNS:www.example.com,DNS:*.example.com'` dans la commande.
+
+Pour vérifier la CSR : 
+
+[source,console]
+----
+# openssl req -text -noout -verify -in intermediate/csr/www.example.com.csr.pem
+----
+
+Pour créer un certificat, utilisez l'autorité de certification intermédiaire pour signer le CSR. Si le certificat est destiné à être utilisé sur un serveur, utilisez l'extension `server_cert`. Si le certificat doit être utilisé pour l'authentification des utilisateurs, utilisez l'extension `usr_cert`. Les certificats ont généralement une validité d'un an, bien qu'une autorité de certification accorde généralement quelques jours de plus pour des raisons pratiques.
+
+
+[source,console]
+----
+# cd /root/ca
+# openssl ca -config intermediate/openssl.cnf \
+      -extensions server_cert -days 375 -notext -md sha256 \
+      -in intermediate/csr/www.example.com.csr.pem \
+      -out intermediate/certs/www.example.com.cert.pem
+# chmod 444 intermediate/certs/www.example.com.cert.pem
+----
+
+Le fichier `intermediate/index.txt` doit contenir une ligne faisant référence à ce nouveau certificat.
+
+----
+V 160420124233Z 1000 unknown ... /CN=www.example.com
+----
+
+
+=== Vérifier le certificat
+
+
+[source,console]
+----
+# openssl x509 -noout -text \
+      -in intermediate/certs/www.example.com.cert.pem
+
+The Issuer is the intermediate CA. The Subject refers to the certificate itself.
+
+Signature Algorithm: sha256WithRSAEncryption
+    Issuer: C=GB, ST=England,
+            O=Alice Ltd, OU=Alice Ltd Certificate Authority,
+            CN=Alice Ltd Intermediate CA
+    Validity
+        Not Before: Apr 11 12:42:33 2015 GMT
+        Not After : Apr 20 12:42:33 2016 GMT
+    Subject: C=US, ST=California, L=Mountain View,
+             O=Alice Ltd, OU=Alice Ltd Web Services,
+             CN=www.example.com
+    Subject Public Key Info:
+        Public Key Algorithm: rsaEncryption
+            Public-Key: (2048 bit)
+----
+
+
+
+La sortie montrera également les extensions X509v3. Lors de la création du certificat, vous avez utilisé l'extension `server_cert` ou `usr_cert`. Les options de la section de configuration correspondante seront reflétées dans la sortie.
+
+----
+X509v3 extensions:
+    X509v3 Basic Constraints:
+        CA:FALSE
+    Netscape Cert Type:
+        SSL Server
+    Netscape Comment:
+        OpenSSL Generated Server Certificate
+    X509v3 Subject Key Identifier:
+        B1:B8:88:48:64:B7:45:52:21:CC:35:37:9E:24:50:EE:AD:58:02:B5
+    X509v3 Authority Key Identifier:
+        keyid:69:E8:EC:54:7F:25:23:60:E5:B6:E7:72:61:F1:D4:B9:21:D4:45:E9
+        DirName:/C=GB/ST=England/O=Alice Ltd/OU=Alice Ltd Certificate Authority/CN=Alice Ltd Root CA
+        serial:10:00
+
+    X509v3 Key Usage: critical
+        Digital Signature, Key Encipherment
+    X509v3 Extended Key Usage:
+        TLS Web Server Authentication
+----
+
+Utilisez le fichier de la chaîne de certificats de l'AC que nous avons créé précédemment (`ca-chain.cert.pem`) pour vérifier que le nouveau certificat possède une chaîne de confiance valide.
+
+
+[source,console]
+----
+# openssl verify -CAfile intermediate/certs/ca-chain.cert.pem \
+      intermediate/certs/www.example.com.cert.pem
+
+www.example.com.cert.pem: OK
+----
+
+
+=== Déployer le certificat
+
+Vous pouvez maintenant soit déployer votre nouveau certificat sur un serveur, soit distribuer le certificat à un client. Lors du déploiement sur une application serveur (par exemple, Apache), vous devez rendre les fichiers suivants disponibles :
+
+* ca-chain.cert.pem
+* www.example.com.key.pem
+* www.example.com.cert.pem
+
+Si vous signez la CSR d'un tiers, vous n'avez pas accès à sa clé privée. Il vous suffit donc de lui rendre le fichier de chaîne (`ca-chain.cert.pem`) et le certificat (`www.example.com.cert.pem`).
+
+
+
+== Listes de révocation de certificats
+
+Une liste de révocation de certificats (CRL) fournit une liste des certificats qui ont été révoqués. Une application client, telle qu'un navigateur Web, peut utiliser une CRL pour vérifier l'authenticité d'un serveur. Une application serveur, telle qu'Apache ou OpenVPN, peut utiliser une CRL pour refuser l'accès aux clients qui ne sont plus fiables.
+
+Publier la CRL à un emplacement accessible au public (par exemple, http://example.com/intermediate.crl.pem). Les tiers peuvent récupérer la CRL à partir de cet emplacement pour vérifier si les certificats dont ils dépendent ont été révoqués.
+
+NOTE: Certains fournisseurs d'applications ont abandonné les CRL et utilisent à la place le protocole OCSP (_Online Certificate Status Protocol_).
+
+=== Préparez le fichier de configuration
+
+Lorsqu'une autorité de certification signe un certificat, elle code normalement l'emplacement de la CRL dans le certificat. Ajoutez `crlDistributionPoints` aux sections appropriées. Dans notre cas, ajoutez-le à la section `[ server_cert ]`.
+
+----
+[ server_cert ]
+# ... snipped ...
+crlDistributionPoints = URI:http://example.com/intermediate.crl.pem
+----
+
+=== Créer la CRL
+
+[source,console]
+---
+# cd /root/ca
+# openssl ca -config intermediate/openssl.cnf \
+      -gencrl -out intermediate/crl/intermediate.crl.pem
+----
+
+
+NOTE: La section `CRL OPTIONS` de la page de manuel `ca` contient plus d'informations sur la façon de créer des CRL.
+
+Vous pouvez vérifier le contenu de la CRL avec l'outil `crl`.
+
+[source,console]
+---
+# openssl crl -in intermediate/crl/intermediate.crl.pem -noout -text
+----
+
+
+Aucun certificat n'a encore été révoqué, la sortie indiquera donc `No Revoked Certificates`.
+
+Vous devez recréer la CRL à intervalles réguliers. Par défaut, la CRL expire après 30 jours. Ceci est contrôlé par l'option `default_crl_days` dans la section `[ CA_default ]`.
+
+
+=== Révoquer un certificat
+
+Prenons un exemple. Alice exécute le serveur web Apache et possède un dossier privé contenant des photos de chatons d'une beauté à couper le souffle. Alice veut accorder à son ami, Bob, l'accès à cette collection.
+
+Bob crée une clé privée et une demande de signature de certificat (CSR).
+
+
+[source,console]
+----
+$ cd /home/bob
+$ openssl genrsa -out bob@example.com.key.pem 2048
+$ openssl req -new -key bob@example.com.key.pem \
+      -out bob@example.com.csr.pem
+----
+
+Vous êtes sur le point d'être invité à saisir des informations qui seront intégrées dans votre demande de certificat.
+
+----
+Country Name [XX]:US
+State or Province Name []:California
+Locality Name []:San Francisco
+Organization Name []:Bob Ltd
+Organizational Unit Name []:
+Common Name []:bob@example.com
+Email Address []:
+----
+
+Bob envoie son CSR à Alice, qui le signe ensuite.
+
+
+[source,console]
+----
+# cd /root/ca
+# openssl ca -config intermediate/openssl.cnf \
+      -extensions usr_cert -notext -md sha256 \
+      -in intermediate/csr/bob@example.com.csr.pem \
+      -out intermediate/certs/bob@example.com.cert.pem
+
+Sign the certificate? [y/n]: y
+1 out of 1 certificate requests certified, commit? [y/n]: y
+----
+
+
+Alice vérifie que le certificat est valide :
+
+
+[source,console]
+----
+# openssl verify -CAfile intermediate/certs/ca-chain.cert.pem \
+      intermediate/certs/bob@example.com.cert.pem
+
+bob@example.com.cert.pem: OK
+----
+
+
+Le fichier `index.txt` doit contenir une nouvelle entrée.
+
+----
+V 160420124740Z 1001 unknown ... /CN=bob@example.com
+----
+
+
+
+Alice envoie à Bob le certificat signé. Bob installe le certificat dans son navigateur web et peut maintenant accéder aux photos de chatons d'Alice. Hourra !
+
+Malheureusement, il s'avère que Bob se comporte mal. Bob a posté les photos des chatons d'Alice sur Hacker News, prétendant qu'il s'agit des siens et gagnant une énorme popularité. Alice le découvre et doit révoquer son accès immédiatement.
+
+
+
+[source,console]
+----
+# cd /root/ca
+# openssl ca -config intermediate/openssl.cnf \
+      -revoke intermediate/certs/bob@example.com.cert.pem
+
+Enter pass phrase for intermediate.key.pem: secretpassword
+Revoking Certificate 1001.
+Data Base Updated
+----
+
+
+La ligne du fichier `index.txt` qui correspond au certificat de Bob commence maintenant par le caractère `R`. Cela signifie que le certificat a été révoqué.
+
+
+----
+R 160420124740Z 150411125310Z 1001 unknown ... /CN=bob@example.com
+----
+
+
+Après avoir révoqué le certificat de Bob, Alice doit recréer la CRL.
+
+=== Utilisation de la CRL côté serveur
+
+Pour les certificats clients, c'est généralement une application côté serveur (par exemple, Apache) qui effectue la vérification. Cette application doit avoir un accès local à la CRL.
+
+Dans le cas d'Alice, elle peut ajouter la directive `SSLCARevocationPath` à sa configuration Apache et copier la CRL sur son serveur web. La prochaine fois que Bob se connectera au serveur Web, Apache comparera son certificat client à la CRL et lui refusera l'accès.
+
+De même, OpenVPN dispose d'une directive `crl-verify` afin de pouvoir bloquer les clients dont les certificats ont été révoqués.
+
+
+=== Utilisation de la CRL côté client
+
+Pour les certificats de serveur, c'est généralement une application côté client (par exemple, un navigateur Web) qui effectue la vérification. Cette application doit avoir un accès distant à la CRL.
+
+Si un certificat a été signé avec une extension qui inclut `crlDistributionPoints`, une application côté client peut lire ces informations et récupérer la CRL à l'emplacement spécifié.
+
+Les points de distribution de la CRL sont visibles dans les détails du certificat X509v3.
+
+[source,console]
+----
+# openssl x509 -in cute-kitten-pictures.example.com.cert.pem -noout -text
+
+    X509v3 CRL Distribution Points:
+
+        Full Name:
+          URI:http://example.com/intermediate.crl.pem
+----
+
+
+== Online Certificate Status Protocol
+
+Le protocole OCSP (_Online Certificate Status Protocol_) a été créé comme une alternative aux listes de révocation de certificats (CRL). Comme les CRL, OCSP permet à un demandeur (par exemple, un navigateur Web) de déterminer l'état de révocation d'un certificat.
+
+Lorsqu'une autorité de certification signe un certificat, elle inclut généralement une adresse de serveur OCSP (par exemple, http://ocsp.example.com) dans le certificat. Cette fonction est similaire à celle des `crlDistributionPoints` utilisés pour les CRL.
+
+Par exemple, lorsqu'un certificat de serveur est présenté à un navigateur Web, celui-ci envoie une requête à l'adresse du serveur OCSP spécifiée dans le certificat. À cette adresse, un répondeur OCSP écoute les requêtes et répond en indiquant l'état de révocation du certificat.
+
+NOTE: 
+
+Il est recommandé d'utiliser OCSP plutôt que les CRL, même si, de manière réaliste, vous n'aurez besoin d'OCSP que pour les certificats de sites Web. Certains navigateurs Web ont abandonné ou supprimé la prise en charge des LCR.
+
+=== Préparer le fichier de configuration
+
+Pour utiliser OCSP, l'AC doit encoder l'emplacement du serveur OCSP dans les certificats qu'elle signe. Utilisez l'option `authorityInfoAccess` dans les sections appropriées, ce qui dans notre cas signifie la section `[ server_cert ]`.
+
+----
+[ server_cert ]
+# ... snipped ...
+authorityInfoAccess = OCSP;URI:http://ocsp.example.com
+----
+
+
+=== Créer la paire OCSP
+
+Le répondeur OCSP a besoin d'une paire cryptographique pour signer la réponse qu'il envoie à la partie requérante. La paire cryptographique OCSP doit être signée par la même autorité de certification que celle qui a signé le certificat à vérifier.
+
+Créez une clé privée et chiffrez-la avec le chiffrement AES-256.
+
+
+[source,console]
+----
+# cd /root/ca
+# openssl genrsa -aes256 \
+      -out intermediate/private/ocsp.example.com.key.pem 4096
+----
+
+
+Créez une demande de signature de certificat (CSR). Les détails doivent généralement correspondre à ceux de l'autorité de certification signataire. Le nom commun (_Common Name_), cependant, doit être un nom de domaine entièrement qualifié.
+
+
+[source,console]
+----
+# cd /root/ca
+# openssl req -config intermediate/openssl.cnf -new -sha256 \
+      -key intermediate/private/ocsp.example.com.key.pem \
+      -out intermediate/csr/ocsp.example.com.csr.pem
+
+Enter pass phrase for intermediate.key.pem: secretpassword
+You are about to be asked to enter information that will be incorporated
+into your certificate request.
+-----
+Country Name (2 letter code) [XX]:GB
+State or Province Name []:England
+Locality Name []:
+Organization Name []:Alice Ltd
+Organizational Unit Name []:Alice Ltd Certificate Authority
+Common Name []:ocsp.example.com
+Email Address []:
+----
+
+
+Signer le CSR avec l'AC intermédiaire.
+
+[source,console]
+----
+# openssl ca -config intermediate/openssl.cnf \
+      -extensions ocsp -days 375 -notext -md sha256 \
+      -in intermediate/csr/ocsp.example.com.csr.pem \
+      -out intermediate/certs/ocsp.example.com.cert.pem
+----
+
+
+Vérifiez que le certificat possède les extensions X509v3 correctes.
+
+
+[source,console]
+----
+# openssl x509 -noout -text \
+      -in intermediate/certs/ocsp.example.com.cert.pem
+
+    X509v3 Key Usage: critical
+        Digital Signature
+    X509v3 Extended Key Usage: critical
+        OCSP Signing
+----
+
+
+=== Révoquer un certificat
+
+L'outil OpenSSL `ocsp` peut agir comme un répondeur OCSP, mais il n'est destiné qu'aux tests. Il existe des répondeurs OCSP prêts pour la production, mais ils dépassent le cadre de ce guide.
+
+Créez un certificat de serveur à tester.
+
+
+[source,console]
+----
+# cd /root/ca
+# openssl genrsa -out intermediate/private/test.example.com.key.pem 2048
+# openssl req -config intermediate/openssl.cnf \
+      -key intermediate/private/test.example.com.key.pem \
+      -new -sha256 -out intermediate/csr/test.example.com.csr.pem
+# openssl ca -config intermediate/openssl.cnf \
+      -extensions server_cert -days 375 -notext -md sha256 \
+      -in intermediate/csr/test.example.com.csr.pem \
+      -out intermediate/certs/test.example.com.cert.pem
+----
+
+
+Exécutez le répondeur OCSP sur `localhost`. Plutôt que de stocker le statut de révocation dans un fichier CRL séparé, le répondeur OCSP lit directement le fichier `index.txt`. La réponse est signée avec la paire cryptographique OCSP (en utilisant les options `-rkey` et `-rsigner`).
+
+
+[source,console]
+----
+# openssl ocsp -port 127.0.0.1:2560 -text -sha256 \
+      -index intermediate/index.txt \
+      -CA intermediate/certs/ca-chain.cert.pem \
+      -rkey intermediate/private/ocsp.example.com.key.pem \
+      -rsigner intermediate/certs/ocsp.example.com.cert.pem \
+      -nrequest 1
+
+Enter pass phrase for ocsp.example.com.key.pem: secretpassword
+----
+
+
+Dans un autre terminal, envoyez une requête au répondeur OCSP. L'option `-cert` spécifie le certificat à interroger.
+
+
+[source,console]
+----
+# openssl ocsp -CAfile intermediate/certs/ca-chain.cert.pem \
+      -url http://127.0.0.1:2560 -resp_text \
+      -issuer intermediate/certs/intermediate.cert.pem \
+      -cert intermediate/certs/test.example.com.cert.pem
+----
+
+
+Le début de la sortie indique : 
+* si une réponse positive a été reçue (`OCSP Response Status`)
+* l'identité du répondeur (`Responder Id`)
+* l'état de révocation du certificat (`Cert Status`)
+
+----
+OCSP Response Data:
+    OCSP Response Status: successful (0x0)
+    Response Type: Basic OCSP Response
+    Version: 1 (0x0)
+    Responder Id: ... CN = ocsp.example.com
+    Produced At: Apr 11 12:59:51 2015 GMT
+    Responses:
+    Certificate ID:
+      Hash Algorithm: sha1
+      Issuer Name Hash: E35979B6D0A973EBE8AEDED75D8C27D67D2A0334
+      Issuer Key Hash: 69E8EC547F252360E5B6E77261F1D4B921D445E9
+      Serial Number: 1003
+    Cert Status: good
+    This Update: Apr 11 12:59:51 2015 GMT
+----
+
+
+Révoquer le certificat.
+
+
+[source,console]
+----
+# openssl ca -config intermediate/openssl.cnf \
+      -revoke intermediate/certs/test.example.com.cert.pem
+
+Enter pass phrase for intermediate.key.pem: secretpassword
+Revoking Certificate 1003.
+Data Base Updated
+----
+
+
+Comme précédemment, exécutez le répondeur OCSP et, sur un autre terminal, envoyez une requête. Cette fois, la sortie indique `Cert Status : revoked` et `Revocation Time`.
+
+----
+OCSP Response Data:
+    OCSP Response Status: successful (0x0)
+    Response Type: Basic OCSP Response
+    Version: 1 (0x0)
+    Responder Id: ... CN = ocsp.example.com
+    Produced At: Apr 11 13:03:00 2015 GMT
+    Responses:
+    Certificate ID:
+      Hash Algorithm: sha1
+      Issuer Name Hash: E35979B6D0A973EBE8AEDED75D8C27D67D2A0334
+      Issuer Key Hash: 69E8EC547F252360E5B6E77261F1D4B921D445E9
+      Serial Number: 1003
+    Cert Status: revoked
+    Revocation Time: Apr 11 13:01:09 2015 GMT
+    This Update: Apr 11 13:03:00 2015 GMT
+----
+
+
+== Export au format PKCS#12
+
+----
+openssl pkcs12 -export -in intermediate/certs/www.example.com.cert.pem -inkey intermediate/private/www.example.com.key.pem -chain -CAfile intermediate/certs/ca-chain.cert.pem -out intermediate/certs/www.example.com.cert.pfx
+----

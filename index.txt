@@ -1,0 +1,1 @@
+V	320614112242Z		1000	unknown	/C=FR/ST=HDF/O=Manastria/CN=Manastria Intermediate CA/emailAddress=sysadmin@manastria.fr
